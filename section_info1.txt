@@ -1,0 +1,30 @@
+# Begin section definition.
+Begin_Section
+	Begin_Builder
+		NAME = Section1
+
+		Boundary_Bottom = -4258.87
+		Boundary_Left = -5138.23
+		Boundary_Right = 5170.90
+		Boundary_Top = 6044.24
+		Min_Triangle_Area = 64.52
+		Max_Number_of_Fibers = 4000
+
+		Window_Left = -4279.14
+		Window_Bottom = -3400.27
+		Window_Height = 8585.93
+	End_Builder
+	Begin_UserComments
+	End_UserComments
+	Begin_Shape
+		MATERIAL = BiLinear1
+		MESH = 47.75
+		Begin_Line
+			-4279.1, 5185.7
+			4311.8, 5185.7
+			4311.8, -3400.3
+			-4279.1, -3400.3
+			-4279.1, 5185.7
+		End_Line
+	End_Shape
+End_Section
