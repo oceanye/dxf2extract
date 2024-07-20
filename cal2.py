@@ -3,7 +3,55 @@ import matplotlib.pyplot as plt
 import ezdxf
 import numpy as np
 from shapely.geometry import Polygon
+from shapely.geometry import Point
+from tqdm import tqdm
 
+
+def create_grid(polyline, grid_size):
+    min_x, max_x, min_y, max_y = calculate_boundaries(polyline)
+    x = np.arange(min_x, max_x, grid_size)
+    y = np.arange(min_y, max_y, grid_size)
+    return np.meshgrid(x, y)
+
+def get_coordinates(polyline):
+    return [(x, y) for x, y, *_ in polyline.get_points()]
+
+def is_point_inside(point, outer_polyline, inner_polylines):
+    point = Point(point)
+    outer_poly = Polygon(get_coordinates(outer_polyline))
+    if not outer_poly.contains(point):
+        return False
+    for inner in inner_polylines:
+        inner_poly = Polygon(get_coordinates(inner))
+        if inner_poly.contains(point):
+            return False
+    return True
+
+
+
+def calculate_moments_of_inertia_numerical(outer_polyline, inner_polylines, centroid, grid_size):
+    x_grid, y_grid = create_grid(outer_polyline, grid_size)
+    cx, cy = centroid
+
+    Ix = Iy = Ixy = 0
+    area = 0
+
+    total_points = x_grid.shape[0] * x_grid.shape[1]
+    progress_bar = tqdm(total=total_points, desc="计算惯性矩", unit="点")
+
+    for i in range(x_grid.shape[0]):
+        for j in range(x_grid.shape[1]):
+            x, y = x_grid[i, j], y_grid[i, j]
+            if is_point_inside((x, y), outer_polyline, inner_polylines):
+                dx, dy = x - cx, y - cy
+                Ix += dy**2 * grid_size**2
+                Iy += dx**2 * grid_size**2
+                Ixy += dx * dy * grid_size**2
+                area += grid_size**2
+            progress_bar.update(1)
+
+    progress_bar.close()
+    return Ix, Iy, Ixy, area
 
 def read_dwg_and_filter_polylines(file_path):
     doc = ezdxf.readfile(file_path)
@@ -58,6 +106,14 @@ def classify_polylines(polylines):
                                                                                        outermost_polyline)]
     return outermost_polyline, inner_polylines
 
+def calculate_area_numerical(outer_polyline, inner_polylines, grid_size):
+    x_grid, y_grid = create_grid(outer_polyline, grid_size)
+    area = 0
+    for i in range(x_grid.shape[0]):
+        for j in range(x_grid.shape[1]):
+            if is_point_inside((x_grid[i, j], y_grid[i, j]), outer_polyline, inner_polylines):
+                area += grid_size**2
+    return area
 
 def calculate_area_and_centroid(polyline):
     points = polyline.get_points()
@@ -119,7 +175,10 @@ def calculate_moments_of_inertia(outer_polyline, inner_polylines, centroid):
 
 def calculate_polar_moment_of_inertia(Ix, Iy, Ixy):
     return Ix + Iy
-
+def calculate_total_area(outer_polyline, inner_polylines):
+    outer_area, _ = calculate_area_and_centroid(outer_polyline)
+    inner_areas = [calculate_area_and_centroid(inner)[0] for inner in inner_polylines]
+    return outer_area - sum(inner_areas)
 
 def draw_section(outer_polyline, inner_polylines):
     def plot_polyline(ax, polyline, color='blue', fill_color=None):
@@ -138,34 +197,56 @@ def draw_section(outer_polyline, inner_polylines):
     plt.show()
 
 
-# 使用示例
-dwg_file = "section5.dxf"
+def visualize_grid_points(outer_polyline, inner_polylines, grid_size):
+    x_grid, y_grid = create_grid(outer_polyline, grid_size)
+    inside_points = []
+    for i in range(x_grid.shape[0]):
+        for j in range(x_grid.shape[1]):
+            if is_point_inside((x_grid[i, j], y_grid[i, j]), outer_polyline, inner_polylines):
+                inside_points.append((x_grid[i, j], y_grid[i, j]))
 
-closed_polylines = read_dwg_and_filter_polylines(dwg_file)
-outer_polyline, inner_polylines = classify_polylines(closed_polylines)
-outer_area, outer_centroid = calculate_area_and_centroid(outer_polyline)
-inner_areas_and_centroids = [calculate_area_and_centroid(inner_polyline) for inner_polyline in inner_polylines]
-total_inner_area = sum(area for area, _ in inner_areas_and_centroids)
+    fig, ax = plt.subplots()
+    draw_section(outer_polyline, inner_polylines)
+    x, y = zip(*inside_points)
+    ax.scatter(x, y, color='red', s=1)
+    plt.show()
 
-# 计算总面积和重心
-total_area = outer_area - total_inner_area
-cx_total = (outer_area * outer_centroid[0] - sum(
-    area * centroid[0] for area, centroid in inner_areas_and_centroids)) / total_area
-cy_total = (outer_area * outer_centroid[1] - sum(
-    area * centroid[1] for area, centroid in inner_areas_and_centroids)) / total_area
-centroid_total = (cx_total, cy_total)
+if __name__ == "__main__":
+    dwg_file = "section5.dxf"
+    grid_size = 50  # 根据需要调整网格大小
 
-# 计算惯性矩
-Ix, Iy, Ixy = calculate_moments_of_inertia(outer_polyline, inner_polylines, centroid_total)
-J = calculate_polar_moment_of_inertia(Ix, Iy, Ixy)
+    closed_polylines = read_dwg_and_filter_polylines(dwg_file)
+    outer_polyline, inner_polylines = classify_polylines(closed_polylines)
 
-# 输出基本参数
-print(f"总面积: {total_area:.2f}")
-print(f"重心: ({centroid_total[0]:.2f}, {centroid_total[1]:.2f})")
-print(f"绕 x 轴的抗弯惯性矩 (Ix): {Ix:.2f}")
-print(f"绕 y 轴的抗弯惯性矩 (Iy): {Iy:.2f}")
-print(f"抗扭惯性矩 (Polar Moment of Inertia, J): {J:.2f}")
+    print("计算初始重心...")
+    outer_area, outer_centroid = calculate_area_and_centroid(outer_polyline)
+    inner_areas_and_centroids = [calculate_area_and_centroid(inner_polyline) for inner_polyline in inner_polylines]
+    total_inner_area = sum(area for area, _ in inner_areas_and_centroids)
+    total_area = outer_area - total_inner_area
+    cx_total = (outer_area * outer_centroid[0] - sum(
+        area * centroid[0] for area, centroid in inner_areas_and_centroids)) / total_area
+    cy_total = (outer_area * outer_centroid[1] - sum(
+        area * centroid[1] for area, centroid in inner_areas_and_centroids)) / total_area
+    centroid_total = (cx_total, cy_total)
 
+    print("计算围合面积...")
+    enclosed_area = calculate_total_area(outer_polyline, inner_polylines)
 
-# 绘制截面
-draw_section(outer_polyline, inner_polylines)
+    print("开始数值积分计算...")
+    Ix, Iy, Ixy, area_numerical = calculate_moments_of_inertia_numerical(outer_polyline, inner_polylines, centroid_total, grid_size)
+    J = Ix + Iy
+
+    print("\n计算结果：")
+    print(f"围合面积: {enclosed_area:.2f}")
+    print(f"数值积分面积: {area_numerical:.2f}")
+    print(f"面积差异: {abs(enclosed_area - area_numerical):.2f} ({abs(enclosed_area - area_numerical) / enclosed_area * 100:.2f}%)")
+    print(f"重心: ({centroid_total[0]:.2f}, {centroid_total[1]:.2f})")
+    print(f"绕 x 轴的抗弯惯性矩 (Ix): {Ix:.2f}")
+    print(f"绕 y 轴的抗弯惯性矩 (Iy): {Iy:.2f}")
+    print(f"惯性积 (Ixy): {Ixy:.2f}")
+    print(f"极惯性矩 (J): {J:.2f}")
+
+    print("\n绘制截面...")
+    draw_section(outer_polyline, inner_polylines)
+
+    visualize_grid_points(outer_polyline, inner_polylines, grid_size)
