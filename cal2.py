@@ -166,5 +166,6 @@ print(f"绕 x 轴的抗弯惯性矩 (Ix): {Ix:.2f}")
 print(f"绕 y 轴的抗弯惯性矩 (Iy): {Iy:.2f}")
 print(f"抗扭惯性矩 (Polar Moment of Inertia, J): {J:.2f}")
 
+
 # 绘制截面
 draw_section(outer_polyline, inner_polylines)
