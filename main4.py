@@ -152,5 +152,6 @@ def write_section_info(polylines, output_file):
 dwg_file = "section5.dxf"
 output_file = "section_info7.sec"
 
+
 closed_polylines = read_dwg_and_filter_polylines(dwg_file)
 write_section_info(closed_polylines, output_file)
