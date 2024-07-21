@@ -5,16 +5,57 @@ import numpy as np
 from shapely.geometry import Polygon
 from shapely.geometry import Point
 from tqdm import tqdm
+import triangle
 
 
+import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+
+
+
+from matplotlib.patches import Polygon as MplPolygon
+from matplotlib.collections import PatchCollection
+
+
+def create_mesh(outer_polyline, inner_polylines, max_area):
+    # 准备输入数据
+    vertices = get_coordinates(outer_polyline)
+    segments = []
+    holes = []
+
+    # 添加外部轮廓
+    for i in range(len(vertices)):
+        segments.append([i, (i + 1) % len(vertices)])
+
+    # 添加内部轮廓和孔
+    offset = len(vertices)
+    for inner in inner_polylines:
+        inner_vertices = get_coordinates(inner)
+        holes.append(Polygon(inner_vertices).representative_point().coords[0])
+        for i in range(len(inner_vertices)):
+            vertices.append(inner_vertices[i])
+            segments.append([offset + i, offset + (i + 1) % len(inner_vertices)])
+        offset += len(inner_vertices)
+
+    # 创建三角剖分
+    mesh = triangle.triangulate({'vertices': vertices, 'segments': segments, 'holes': holes},
+                                f'pqa{max_area}')
+
+    print(f"网格三角形数量: {len(mesh['triangles'])}")
+    print(f"网格顶点数量: {len(mesh['vertices'])}")
+
+    return mesh
+
+
+def get_coordinates(polyline):
+    return [(vertex[0], vertex[1]) for vertex in polyline]
 def create_grid(polyline, grid_size):
     min_x, max_x, min_y, max_y = calculate_boundaries(polyline)
     x = np.arange(min_x, max_x, grid_size)
     y = np.arange(min_y, max_y, grid_size)
     return np.meshgrid(x, y)
 
-def get_coordinates(polyline):
-    return [(x, y) for x, y, *_ in polyline.get_points()]
+
 
 def is_point_inside(point, outer_polyline, inner_polylines):
     point = Point(point)
@@ -28,31 +69,48 @@ def is_point_inside(point, outer_polyline, inner_polylines):
     return True
 
 
-
-def calculate_moments_of_inertia_numerical(outer_polyline, inner_polylines, centroid, grid_size):
-    x_grid, y_grid = create_grid(outer_polyline, grid_size)
+def calculate_moments_of_inertia_mesh(mesh, outer_polyline, inner_polylines, centroid):
     cx, cy = centroid
-
     Ix = Iy = Ixy = 0
     area = 0
 
-    total_points = x_grid.shape[0] * x_grid.shape[1]
-    progress_bar = tqdm(total=total_points, desc="计算惯性矩", unit="点")
+    outer_polygon = Polygon(get_coordinates(outer_polyline))
+    inner_polygons = [Polygon(get_coordinates(inner)) for inner in inner_polylines]
 
-    for i in range(x_grid.shape[0]):
-        for j in range(x_grid.shape[1]):
-            x, y = x_grid[i, j], y_grid[i, j]
-            if is_point_inside((x, y), outer_polyline, inner_polylines):
-                dx, dy = x - cx, y - cy
-                Ix += dy**2 * grid_size**2
-                Iy += dx**2 * grid_size**2
-                Ixy += dx * dy * grid_size**2
-                area += grid_size**2
-            progress_bar.update(1)
+    total_triangles = len(mesh['triangles'])
+    progress_bar = tqdm(total=total_triangles, desc="计算惯性矩", unit="三角形")
+
+    for triangle in mesh['triangles']:
+        p1, p2, p3 = [mesh['vertices'][i] for i in triangle]
+        triangle_centroid = [(p1[0] + p2[0] + p3[0]) / 3, (p1[1] + p2[1] + p3[1]) / 3]
+
+        # 检查三角形是否在截面内（在外部多边形内但不在任何内部多边形内）
+        if outer_polygon.contains(Point(triangle_centroid)) and not any(
+                inner.contains(Point(triangle_centroid)) for inner in inner_polygons):
+            a = triangle_area(p1, p2, p3)
+            x, y = triangle_centroid
+
+            dx, dy = x - cx, y - cy
+            Ix += (dy ** 2 * a)
+            Iy += (dx ** 2 * a)
+            Ixy += (dx * dy * a)
+            area += a
+
+        progress_bar.update(1)
 
     progress_bar.close()
+
+    print(f"网格计算的总面积: {area:.2f}")
+    if total_triangles > 0:
+        print(
+            f"最小三角形面积: {min(triangle_area(mesh['vertices'][i], mesh['vertices'][j], mesh['vertices'][k]) for i, j, k in mesh['triangles']):.6f}")
+        print(
+            f"最大三角形面积: {max(triangle_area(mesh['vertices'][i], mesh['vertices'][j], mesh['vertices'][k]) for i, j, k in mesh['triangles']):.6f}")
+
     return Ix, Iy, Ixy, area
 
+def triangle_area(p1, p2, p3):
+    return 0.5 * abs((p2[0] - p1[0]) * (p3[1] - p1[1]) - (p3[0] - p1[0]) * (p2[1] - p1[1]))
 def read_dwg_and_filter_polylines(file_path):
     doc = ezdxf.readfile(file_path)
     msp = doc.modelspace()
@@ -211,6 +269,81 @@ def visualize_grid_points(outer_polyline, inner_polylines, grid_size):
     ax.scatter(x, y, color='red', s=1)
     plt.show()
 
+
+
+
+def visualize_mesh(mesh, outer_polyline, inner_polylines, output_file):
+    fig, ax = plt.subplots(figsize=(12, 12))
+
+    # 调试信息
+    print("Outer polyline shape:", np.array(outer_polyline).shape)
+    print("First few points of outer polyline:", outer_polyline[:5])
+
+    # 绘制外部轮廓
+    outer_polyline = np.array(outer_polyline)
+    if outer_polyline.ndim == 2 and outer_polyline.shape[1] == 2:
+        ax.plot(outer_polyline[:, 0], outer_polyline[:, 1], 'k-', linewidth=2)
+    elif outer_polyline.ndim == 1 and len(outer_polyline) % 2 == 0:
+        outer_polyline = outer_polyline.reshape(-1, 2)
+        ax.plot(outer_polyline[:, 0], outer_polyline[:, 1], 'k-', linewidth=2)
+    else:
+        print("Error: Unexpected format for outer_polyline")
+        return
+
+    # 绘制内部轮廓
+    for inner in inner_polylines:
+        inner = np.array(inner)
+        if inner.ndim == 2 and inner.shape[1] == 2:
+            ax.plot(inner[:, 0], inner[:, 1], 'k-', linewidth=2)
+        elif inner.ndim == 1 and len(inner) % 2 == 0:
+            inner = inner.reshape(-1, 2)
+            ax.plot(inner[:, 0], inner[:, 1], 'k-', linewidth=2)
+        else:
+            print(f"Error: Unexpected format for inner polyline: {inner.shape}")
+
+    # 绘制网格边缘
+    edges = set()
+    for triangle in mesh['triangles']:
+        for i in range(3):
+            edge = tuple(sorted([triangle[i], triangle[(i + 1) % 3]]))
+            edges.add(edge)
+
+    lines = [[mesh['vertices'][i], mesh['vertices'][j]] for i, j in edges]
+    lc = LineCollection(lines, colors='gray', linewidths=0.5, alpha=0.5)
+    ax.add_collection(lc)
+
+    # 设置轴的范围和外观
+    ax.set_aspect('equal')
+    ax.set_xlabel('X')
+    ax.set_ylabel('Y')
+    ax.set_title('Mesh Visualization')
+
+    # 保存图像
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300)
+    plt.close()
+
+    print(f"Mesh visualization saved to {output_file}")
+def debug_geometry(outer_polyline, inner_polylines):
+    print("外部多边形坐标:")
+    for point in outer_polyline:
+        print(f"  ({point[0]:.2f}, {point[1]:.2f})")
+
+    print("\n内部多边形坐标:")
+    for i, inner in enumerate(inner_polylines):
+        print(f"内部多边形 {i + 1}:")
+        for point in inner:
+            print(f"  ({point[0]:.2f}, {point[1]:.2f})")
+
+    min_x, max_x, min_y, max_y = calculate_boundaries(outer_polyline)
+    print(f"\n坐标范围: X({min_x:.2f}, {max_x:.2f}), Y({min_y:.2f}, {max_y:.2f})")
+    print(f"外部多边形周长: {calculate_perimeter(outer_polyline):.2f}")
+
+
+def calculate_perimeter(polyline):
+    return sum(
+        ((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2) ** 0.5 for p1, p2 in zip(polyline, polyline[1:] + [polyline[0]]))
+
 if __name__ == "__main__":
     dwg_file = "section5.dxf"
     grid_size = 5  # 根据需要调整网格大小
@@ -233,20 +366,29 @@ if __name__ == "__main__":
     enclosed_area = calculate_total_area(outer_polyline, inner_polylines)
 
     print("开始数值积分计算...")
-    Ix, Iy, Ixy, area_numerical = calculate_moments_of_inertia_numerical(outer_polyline, inner_polylines, centroid_total, grid_size)
+    print("生成网格...")
+    max_area = 100  # 控制网格的细密程度，可以根据需要调整
+    mesh = create_mesh(outer_polyline, inner_polylines, max_area)
+
+    print("计算惯性矩...")
+    Ix, Iy, Ixy, area_mesh = calculate_moments_of_inertia_mesh(mesh, outer_polyline, inner_polylines, centroid_total)
     J = Ix + Iy
 
     print("\n计算结果：")
     print(f"围合面积: {enclosed_area:.2f}")
-    print(f"数值积分面积: {area_numerical:.2f}")
-    print(f"面积差异: {abs(enclosed_area - area_numerical):.2f} ({abs(enclosed_area - area_numerical) / enclosed_area * 100:.2f}%)")
+    print(f"网格化面积: {area_mesh:.2f}")
+    print(f"面积差异: {abs(enclosed_area - area_mesh):.2f} ({abs(enclosed_area - area_mesh) / enclosed_area * 100:.2f}%)")
     print(f"重心: ({centroid_total[0]:.2f}, {centroid_total[1]:.2f})")
     print(f"绕 x 轴的抗弯惯性矩 (Ix): {Ix:.2f}")
     print(f"绕 y 轴的抗弯惯性矩 (Iy): {Iy:.2f}")
     print(f"惯性积 (Ixy): {Ixy:.2f}")
     print(f"极惯性矩 (J): {J:.2f}")
 
-    print("\n绘制截面...")
-    draw_section(outer_polyline, inner_polylines)
+    # 添加额外的检查
+    print("\n额外检查：")
+    print(f"Ix/area: {Ix/area_mesh:.2f}")
+    print(f"Iy/area: {Iy/area_mesh:.2f}")
+    print(f"J/area: {J/area_mesh:.2f}")
 
-    visualize_grid_points(outer_polyline, inner_polylines, grid_size)
+    # 可视化网格
+    visualize_mesh(mesh, outer_polyline, inner_polylines, "mesh_visualization.png")
